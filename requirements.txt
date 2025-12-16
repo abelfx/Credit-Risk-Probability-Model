@@ -6,3 +6,6 @@ scikit-learn
 fastapi
 uvicorn
 pytest
+mlflow
+xverse
+black
