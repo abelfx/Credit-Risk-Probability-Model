@@ -1,5 +1,6 @@
 import pandas as pd
-from sklearn.model_selection import train_test_split
+import numpy as np
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
@@ -19,22 +20,12 @@ if __name__ == '__main__':
     # Load data
     df = pd.read_csv('data/processed/processed_data.csv')
 
-    # Define features and target
-    # Drop non-feature columns. This needs to be robust.
-    # Assuming 'is_high_risk' is the target and 'CustomerId' is an identifier.
-    # The preprocessor might have introduced other non-feature columns.
-    # For this example, let's assume all other columns are features.
-    
-    # A better approach would be to save features list during processing.
-    # For now, we will drop known non-feature columns.
-    
-    # Ensure CustomerId is handled correctly if it's in the processed data
+    # Drop non-feature columns
     if 'CustomerId' in df.columns:
         df = df.drop(columns=['CustomerId'])
     
-    # Handle potential non-numeric columns that are not features
-    # For example, if there are any object type columns left that are not supposed to be there.
-    df = df.select_dtypes(include=np.number)
+    # Handle potential non-numeric columns that are not features and drop rows with NaN values
+    df = df.select_dtypes(include=np.number).dropna()
 
 
     X = df.drop('is_high_risk', axis=1)
@@ -49,7 +40,7 @@ if __name__ == '__main__':
     # --- Logistic Regression ---
     with mlflow.start_run(run_name="Logistic Regression"):
         # Initialize and train model
-        lr = LogisticRegression(random_state=42)
+        lr = LogisticRegression(random_state=42, max_iter=1000) # Increased max_iter for convergence
         lr.fit(X_train, y_train)
 
         # Make predictions
@@ -72,21 +63,35 @@ if __name__ == '__main__':
         print("Logistic Regression model trained and logged.")
 
 
-    # --- Random Forest ---
-    with mlflow.start_run(run_name="Random Forest"):
-        # Initialize and train model
+    # --- Random Forest with Hyperparameter Tuning ---
+    with mlflow.start_run(run_name="Random Forest with GridSearch"):
+        # Define parameter grid
+        param_grid = {
+            'n_estimators': [50, 100], # Reduced for speed
+            'max_depth': [10, None],
+            'min_samples_split': [2, 5]
+        }
+
+        # Initialize GridSearchCV
         rf = RandomForestClassifier(random_state=42)
-        rf.fit(X_train, y_train)
+        grid_search = GridSearchCV(estimator=rf, param_grid=param_grid, cv=3, n_jobs=-1, verbose=2, scoring='f1')
+
+        # Fit GridSearchCV
+        grid_search.fit(X_train, y_train)
+
+        # Get the best model
+        best_rf = grid_search.best_estimator_
 
         # Make predictions
-        y_pred_rf = rf.predict(X_test)
-        y_prob_rf = rf.predict_proba(X_test)[:, 1]
+        y_pred_rf = best_rf.predict(X_test)
+        y_prob_rf = best_rf.predict_proba(X_test)[:, 1]
 
         # Evaluate model
         accuracy_rf, precision_rf, recall_rf, f1_rf, roc_auc_rf = evaluate_model(y_test, y_pred_rf, y_prob_rf)
 
         # Log parameters and metrics
         mlflow.log_param("model_type", "Random Forest")
+        mlflow.log_params(grid_search.best_params_)
         mlflow.log_metric("accuracy", accuracy_rf)
         mlflow.log_metric("precision", precision_rf)
         mlflow.log_metric("recall", recall_rf)
@@ -94,22 +99,25 @@ if __name__ == '__main__':
         mlflow.log_metric("roc_auc", roc_auc_rf)
 
         # Log model
-        mlflow.sklearn.log_model(rf, "random_forest_model")
-        print("Random Forest model trained and logged.")
+        mlflow.sklearn.log_model(best_rf, "random_forest_model")
+        print("Random Forest model with GridSearch trained and logged.")
 
     # --- Model Registration ---
-    # This part should be run after analyzing the results in the MLflow UI.
-    # For automation, we can programmatically select the best model.
+    # Programmatically select the best model based on F1 score.
     
-    # Let's assume the best model is the one with the highest F1 score.
-    if f1_lr > f1_rf:
-        best_run_id = mlflow.search_runs(filter_string="metrics.f1_score = {}".format(f1_lr)).iloc[0].run_id
-        model_uri = f"runs:/{best_run_id}/logistic_regression_model"
-        print("Registering Logistic Regression model.")
+    # Find the best run
+    best_run = mlflow.search_runs(order_by=["metrics.f1_score DESC"]).iloc[0]
+    best_run_id = best_run.run_id
+    
+    # Determine which model it was
+    if "Logistic Regression" in best_run.data.tags.get('mlflow.runName', ''):
+        model_name_from_run = "logistic_regression_model"
     else:
-        best_run_id = mlflow.search_runs(filter_string="metrics.f1_score = {}".format(f1_rf)).iloc[0].run_id
-        model_uri = f"runs:/{best_run_id}/random_forest_model"
-        print("Registering Random Forest model.")
+        model_name_from_run = "random_forest_model"
+
+    model_uri = f"runs:/{best_run_id}/{model_name_from_run}"
+    
+    print(f"Registering {model_name_from_run} as the best model.")
 
     # Register the best model
     model_name = "CreditRiskModel"

@@ -1,11 +1,12 @@
 import pandas as pd
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.cluster import KMeans
 from datetime import datetime
 import numpy as np
+from xverse.transformer import WOE
 
 def create_proxy_target_variable(df):
     """
@@ -48,16 +49,13 @@ def create_proxy_target_variable(df):
 
 def build_feature_engineering_pipeline():
     """
-    Builds a scikit-learn pipeline for feature engineering.
+    Builds a scikit-learn pipeline for feature engineering with WoE.
     """
     # Define numerical features for scaling
-    numerical_features = ['Amount', 'Value', 'TotalTransactionAmount', 'AverageTransactionAmount', 'TransactionCount', 'StdTransactionAmount']
+    numerical_features = ['Amount', 'Value', 'TotalTransactionAmount', 'AverageTransactionAmount', 'TransactionCount', 'StdTransactionAmount', 'TransactionHour', 'TransactionDay', 'TransactionMonth', 'TransactionYear']
 
-    # Define categorical features for one-hot encoding
+    # Define categorical features for WoE transformation
     categorical_features = ['ProviderId', 'ProductId', 'ProductCategory', 'ChannelId', 'PricingStrategy']
-
-    # Define date features to be extracted
-    date_features = ['TransactionStartTime']
 
     # Create transformers for numerical and categorical features
     numerical_transformer = Pipeline(steps=[
@@ -65,39 +63,23 @@ def build_feature_engineering_pipeline():
         ('scaler', StandardScaler())
     ])
 
-    categorical_transformer = Pipeline(steps=[
-        ('imputer', SimpleImputer(strategy='most_frequent')),
-        ('onehot', OneHotEncoder(handle_unknown='ignore'))
-    ])
-
-    # Create a transformer for date features
-    class DateTransformer(BaseEstimator, TransformerMixin):
-        def fit(self, X, y=None):
-            return self
-        def transform(self, X, y=None):
-            X_transformed = X.copy()
-            X_transformed['TransactionHour'] = pd.to_datetime(X_transformed['TransactionStartTime']).dt.hour
-            X_transformed['TransactionDay'] = pd.to_datetime(X_transformed['TransactionStartTime']).dt.day
-            X_transformed['TransactionMonth'] = pd.to_datetime(X_transformed['TransactionStartTime']).dt.month
-            X_transformed['TransactionYear'] = pd.to_datetime(X_transformed['TransactionStartTime']).dt.year
-            return X_transformed.drop(columns=['TransactionStartTime'])
-
-    date_transformer = DateTransformer()
-
-    # Create a preprocessor to apply different transformations to different columns
+    # Using WOE transformer for categorical features
+    # Note: The WOE transformer from xverse is not a standard sklearn transformer.
+    # It doesn't fit neatly into a pipeline that processes X only.
+    # It needs to be applied separately or with a custom wrapper.
+    # For this implementation, we will apply it in a slightly different manner in the main block.
+    
+    # For pipeline integration, we would typically wrap it. However, to keep it clear,
+    # we will create a preprocessor for numerical and pass-through the rest.
+    
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', numerical_transformer, numerical_features),
-            ('cat', categorical_transformer, categorical_features),
-            ('date', date_transformer, date_features)
+            ('num', numerical_transformer, numerical_features)
         ],
         remainder='passthrough'
     )
-
-    # Create the full feature engineering pipeline
-    pipeline = Pipeline(steps=[('preprocessor', preprocessor)])
     
-    return pipeline
+    return preprocessor
 
 def create_aggregate_features(df):
     """
@@ -123,51 +105,62 @@ if __name__ == '__main__':
     # Create aggregate features
     df = create_aggregate_features(df)
     
-    # --- Adjusted Script ---
-    
+    # Extract Date Features
     df['TransactionHour'] = pd.to_datetime(df['TransactionStartTime']).dt.hour
     df['TransactionDay'] = pd.to_datetime(df['TransactionStartTime']).dt.day
     df['TransactionMonth'] = pd.to_datetime(df['TransactionStartTime']).dt.month
     df['TransactionYear'] = pd.to_datetime(df['TransactionStartTime']).dt.year
     df = df.drop(columns=['TransactionStartTime'])
 
+    # Define features X and target y
+    y = df['is_high_risk']
+    X = df.drop('is_high_risk', axis=1)
+
+    # Define feature types
     numerical_features = ['Amount', 'Value', 'TotalTransactionAmount', 'AverageTransactionAmount', 'TransactionCount', 'StdTransactionAmount', 'TransactionHour', 'TransactionDay', 'TransactionMonth', 'TransactionYear']
     categorical_features = ['ProviderId', 'ProductId', 'ProductCategory', 'ChannelId', 'PricingStrategy']
 
+    # Apply WoE transformation to categorical features
+    woe = WOE()
+    X_woe = woe.fit_transform(X[categorical_features], y)
+    
+    # The rest of the features
+    X_other = X.drop(columns=categorical_features)
+
+    # Combine WoE transformed features with the rest
+    X_combined = pd.concat([X_woe, X_other], axis=1)
+
+    # Now apply scaling to numerical features
+    # We need to make sure we only scale the original numerical features
     numerical_transformer = Pipeline(steps=[
         ('imputer', SimpleImputer(strategy='median')),
         ('scaler', StandardScaler())
     ])
 
-    categorical_transformer = Pipeline(steps=[
-        ('imputer', SimpleImputer(strategy='most_frequent')),
-        ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
-    ])
-
+    # Create a column transformer for the numerical part
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', numerical_transformer, numerical_features),
-            ('cat', categorical_transformer, categorical_features)
+            ('num', numerical_transformer, numerical_features)
         ],
         remainder='passthrough'
     )
-    
-    processed_data = preprocessor.fit_transform(df)
-    
-    cat_feature_names = preprocessor.named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
-    
-    # Identify remainder columns that are not transformed
-    transformed_cols = numerical_features + categorical_features
-    remainder_cols = [col for col in df.columns if col not in transformed_cols]
 
-    # Combine all feature names in the correct order
-    all_feature_names = numerical_features + list(cat_feature_names) + remainder_cols
+    # Fit and transform the combined data
+    processed_data = preprocessor.fit_transform(X_combined)
+
+    # Reconstruct the DataFrame
+    # Get the columns in the correct order
+    remainder_cols = [col for col in X_combined.columns if col not in numerical_features]
+    all_feature_names = numerical_features + remainder_cols
     
     processed_df = pd.DataFrame(processed_data, columns=all_feature_names)
+    
+    # Add the target variable back for saving
+    processed_df['is_high_risk'] = y.values
     
     # Save the processed data
     processed_df.to_csv('data/processed/processed_data.csv', index=False)
     
-    print("Processed data saved to data/processed/processed_data.csv")
+    print("Processed data with WoE transformation saved to data/processed/processed_data.csv")
     print("Shape of processed data:", processed_df.shape)
     print("Columns in processed data:", processed_df.columns.tolist())
