@@ -3,7 +3,48 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
+from sklearn.cluster import KMeans
+from datetime import datetime
 import numpy as np
+
+def create_proxy_target_variable(df):
+    """
+    Creates a proxy target variable for credit risk using RFM and K-Means.
+    """
+    # Convert 'TransactionStartTime' to datetime
+    df['TransactionStartTime'] = pd.to_datetime(df['TransactionStartTime'])
+    
+    # Define a snapshot date
+    snapshot_date = df['TransactionStartTime'].max() + pd.Timedelta(days=1)
+    
+    # Calculate RFM metrics
+    rfm = df.groupby('CustomerId').agg({
+        'TransactionStartTime': lambda date: (snapshot_date - date.max()).days,
+        'TransactionId': 'count',
+        'Amount': 'sum'
+    }).reset_index()
+
+    # Rename columns
+    rfm.columns = ['CustomerId', 'Recency', 'Frequency', 'Monetary']
+
+    # Pre-process RFM features
+    rfm_scaled = StandardScaler().fit_transform(rfm[['Recency', 'Frequency', 'Monetary']])
+    
+    # Cluster customers using K-Means
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+    rfm['Cluster'] = kmeans.fit_predict(rfm_scaled)
+    
+    # Identify the high-risk cluster
+    # The cluster with the highest recency, lowest frequency, and lowest monetary value is considered high-risk.
+    high_risk_cluster = rfm.groupby('Cluster')[['Recency', 'Frequency', 'Monetary']].mean().idxmax()['Recency']
+    
+    # Create the target variable
+    rfm['is_high_risk'] = np.where(rfm['Cluster'] == high_risk_cluster, 1, 0)
+    
+    # Merge the target variable back into the main dataframe
+    df = pd.merge(df, rfm[['CustomerId', 'is_high_risk']], on='CustomerId', how='left')
+    
+    return df
 
 def build_feature_engineering_pipeline():
     """
@@ -75,57 +116,12 @@ def create_aggregate_features(df):
 if __name__ == '__main__':
     # Load the raw data
     df = pd.read_csv('data/raw/data.csv')
+
+    # Create proxy target variable
+    df = create_proxy_target_variable(df)
     
     # Create aggregate features
     df = create_aggregate_features(df)
-    
-    # Build the feature engineering pipeline
-    fe_pipeline = build_feature_engineering_pipeline()
-    
-    # Apply the pipeline to the data
-    processed_data = fe_pipeline.fit_transform(df)
-    
-    # The output of the pipeline is a numpy array. To save it as a CSV with column names, 
-    # we need to get the feature names from the preprocessor.
-    
-    # Get feature names after one-hot encoding
-    cat_feature_names = fe_pipeline.named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
-    
-    # Get remaining feature names
-    # The remainder columns are passed through. Let's find out what they are.
-    # The columns transformed are numerical_features, categorical_features, and date_features.
-    # We need to be careful about the order.
-    
-    # Let's create a new dataframe with the processed data
-    
-    # For simplicity for now, let's just save the numpy array
-    # A more robust solution would be to reconstruct the DataFrame with proper column names.
-    
-    # For now, let's just demonstrate the pipeline creation and transformation.
-    # In a real scenario, you would save this processed_data to be used by the training script.
-    
-    print("Feature engineering pipeline created and applied.")
-    print("Shape of processed data:", processed_data.shape)
-
-    # To properly save the data, we need to handle the column names which can be complex with ColumnTransformer.
-    # Here is a way to do it:
-    
-    # Get the numerical feature names (they remain the same)
-    num_features = numerical_features
-    
-    # Get the date feature names
-    date_feature_names = ['TransactionHour', 'TransactionDay', 'TransactionMonth', 'TransactionYear']
-
-    # Get the list of columns that are passed through
-    remainder_cols = [col for col in df.columns if col not in numerical_features + categorical_features + date_features]
-
-    # Combine all feature names
-    all_feature_names = num_features + list(cat_feature_names) + date_feature_names + remainder_cols
-    
-    # It seems there is an issue with the column ordering and what is passed as remainder.
-    # A simpler approach for the script is to do the date transformation first, then apply the preprocessor.
-
-    # Let's adjust the script for clarity and correctness of saving.
     
     # --- Adjusted Script ---
     
